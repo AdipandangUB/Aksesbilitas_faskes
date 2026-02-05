@@ -24,14 +24,14 @@ warnings.filterwarnings('ignore')
 # KONFIGURASI HALAMAN
 # ============================================================
 st.set_page_config(
-    page_title="Analisis Jangkauan Fasilitas Kesehatan dengan Network Coverage",
+    page_title="Analisis Aksesbilitas Fasilitas Kesehatan dengan Network Coverage",
     page_icon="🏥📍",
     layout="wide"
 )
 
 # Judul aplikasi
-st.title("🏥📍 Analisis Spasial Jangkauan Fasilitas Kesehatan")
-st.markdown("**Analisis zona jangkauan dengan dua metode coverage dari titik analisis**")
+st.title("🏥📍 Analisis Spasial Aksesbilitas Fasilitas Kesehatan")
+st.markdown("**Analisis zona Aksesbilitas dengan dua metode coverage dari titik analisis**")
 
 # ============================================================
 # FUNGSI KONVERSI MODA TRANSPORTASI
