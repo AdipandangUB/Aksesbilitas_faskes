@@ -3,5 +3,5 @@ streamlit-folium==0.18.0
 osmnx==1.9.2
 networkx==3.3
 shapely==2.0.6
-
+matplotlib>=3.5
 
