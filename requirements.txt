@@ -4,5 +4,5 @@ osmnx==1.9.2
 geopandas==0.14.4
 networkx==3.3
 shapely==2.0.4
-pyproj==3.5.0
+pyproj==3.6.1
 
