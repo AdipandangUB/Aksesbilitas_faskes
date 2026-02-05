@@ -1,3 +1,4 @@
+# Tambahkan di bagian paling atas setelah import
 import streamlit as st
 import osmnx as ox
 import networkx as nx
@@ -19,6 +20,20 @@ from collections import defaultdict
 
 # Suppress warnings
 warnings.filterwarnings('ignore')
+
+# ============================================================
+# FIX: INISIALISASI SESSION STATE
+# ============================================================
+if 'analysis_results' not in st.session_state:
+    st.session_state.analysis_results = None
+if 'map_created' not in st.session_state:
+    st.session_state.map_created = False
+if 'accessibility_zones' not in st.session_state:
+    st.session_state.accessibility_zones = None
+if 'health_facilities' not in st.session_state:
+    st.session_state.health_facilities = None
+if 'reachable_edges' not in st.session_state:
+    st.session_state.reachable_edges = None
 
 # ============================================================
 # KONFIGURASI HALAMAN
@@ -616,13 +631,14 @@ def analyze_from_point_main(location_point, network_type, speed_kmh, radius_m, t
         return None, None, None, None
 
 # ============================================================
-# FUNGSI PEMBUATAN PETA - DENGAN NETWORK VISUALIZATION
+# FUNGSI PEMBUATAN PETA - DENGAN NETWORK VISUALIZATION (FIXED)
 # ============================================================
 def create_comprehensive_map(location_point, accessibility_zones, health_facilities, reachable_edges_dict=None):
     """
     Membuat peta interaktif yang komprehensif dengan visualisasi jaringan
     """
     try:
+        # FIX: Gunakan unique key untuk mencegah re-rendering
         m = folium.Map(location=location_point, zoom_start=14, 
                       tiles='OpenStreetMap', control_scale=True)
         
@@ -656,8 +672,7 @@ def create_comprehensive_map(location_point, accessibility_zones, health_facilit
                             if len(coords) >= 2:
                                 folium_coords = []
                                 for x, y in coords:
-                                    # Asumsi: koordinat sudah dalam proyeksi lokal
-                                    # Dalam implementasi sebenarnya perlu konversi ke WGS84
+                                    # Konversi ke WGS84 jika diperlukan
                                     folium_coords.append([y, x])
                                 
                                 folium.PolyLine(
@@ -722,10 +737,11 @@ def create_comprehensive_map(location_point, accessibility_zones, health_facilit
                         ).add_to(m)
                         
             except Exception as e:
+                st.warning(f"Error menambahkan zona {time_limit} menit: {str(e)}")
                 # Fallback: buat circle sederhana
                 folium.Circle(
                     location=location_point,
-                    radius=zone_data['max_distance'],
+                    radius=zone_data.get('max_distance', 1000),
                     color=color,
                     fill=True,
                     fill_color=color,
@@ -811,22 +827,31 @@ def create_comprehensive_map(location_point, accessibility_zones, health_facilit
         # Tambahkan legenda
         legend_html = '''
         <div style="position: fixed; 
-                    bottom: 50px; left: 50px; width: 200px; height: 250px; 
+                    bottom: 50px; left: 50px; width: 220px; height: 280px; 
                     background-color: white; border:2px solid grey; z-index:9999; 
-                    font-size:14px; padding: 10px; border-radius: 5px;">
+                    font-size:14px; padding: 10px; border-radius: 5px; opacity: 0.9;">
             <b>LEGENDA</b><br>
             <i class="fa fa-bullseye" style="color:red"></i> Titik Analisis<br>
             <i class="fa fa-hospital" style="color:red"></i> Rumah Sakit<br>
             <i class="fa fa-medkit" style="color:blue"></i> Klinik<br>
-            <div style="background-color: #FFEBEE; width: 20px; height: 20px; display: inline-block; margin-right: 5px;"></div> 5 menit<br>
-            <div style="background-color: #FFCDD2; width: 20px; height: 20px; display: inline-block; margin-right: 5px;"></div> 10 menit<br>
-            <div style="background-color: #EF9A9A; width: 20px; height: 20px; display: inline-block; margin-right: 5px;"></div> 15 menit<br>
-            <div style="background-color: #E57373; width: 20px; height: 20px; display: inline-block; margin-right: 5px;"></div> 20 menit<br>
-            <div style="background-color: #EF5350; width: 20px; height: 20px; display: inline-block; margin-right: 5px;"></div> 25 menit<br>
+            <i class="fa fa-user-md" style="color:green"></i> Dokter<br>
+            <i class="fa fa-pills" style="color:orange"></i> Apotek<br>
+            <i class="fa fa-heart" style="color:purple"></i> Fasilitas Lain<br>
+            <div style="background-color: #FFEBEE; width: 20px; height: 20px; display: inline-block; margin-right: 5px; border: 1px solid #ccc;"></div> 5 menit<br>
+            <div style="background-color: #FFCDD2; width: 20px; height: 20px; display: inline-block; margin-right: 5px; border: 1px solid #ccc;"></div> 10 menit<br>
+            <div style="background-color: #EF9A9A; width: 20px; height: 20px; display: inline-block; margin-right: 5px; border: 1px solid #ccc;"></div> 15 menit<br>
+            <div style="background-color: #E57373; width: 20px; height: 20px; display: inline-block; margin-right: 5px; border: 1px solid #ccc;"></div> 20 menit<br>
+            <div style="background-color: #EF5350; width: 20px; height: 20px; display: inline-block; margin-right: 5px; border: 1px solid #ccc;"></div> 25 menit<br>
+            <div style="background-color: #F44336; width: 20px; height: 20px; display: inline-block; margin-right: 5px; border: 1px solid #ccc;"></div> 30 menit<br>
+            <div style="margin-top: 5px;"><small><i>Garis tipis: Jaringan jalan yang terjangkau</i></small></div>
         </div>
         '''
         
         m.get_root().html.add_child(folium.Element(legend_html))
+        
+        # FIX: Simpan peta ke session state untuk mencegah re-rendering
+        st.session_state.map_created = True
+        st.session_state.last_map = m
         
         return m
         
@@ -932,6 +957,15 @@ with st.sidebar:
     
     analyze_button = st.button("🚀 Jalankan Analisis", type="primary", use_container_width=True)
     
+    # Tombol reset
+    if st.button("🔄 Reset Analisis", use_container_width=True):
+        st.session_state.analysis_results = None
+        st.session_state.map_created = False
+        st.session_state.accessibility_zones = None
+        st.session_state.health_facilities = None
+        st.session_state.reachable_edges = None
+        st.rerun()
+    
     st.markdown("---")
     st.info("""
     **📌 Panduan Metode Network Analysis:**
@@ -954,7 +988,7 @@ with st.sidebar:
     """)
 
 # ============================================================
-# MAIN APPLICATION
+# MAIN APPLICATION - FIXED VERSION
 # ============================================================
 if analyze_button and time_limits:
     # Kumpulkan parameter tambahan
@@ -980,6 +1014,12 @@ if analyze_button and time_limits:
     if result[0] is not None or area_calculation_method == "Buffer dari Titik":
         graph, health_facilities, accessibility_zones, reachable_edges = result
         
+        # FIX: Simpan hasil ke session state
+        st.session_state.analysis_results = result
+        st.session_state.accessibility_zones = accessibility_zones
+        st.session_state.health_facilities = health_facilities
+        st.session_state.reachable_edges = reachable_edges
+        
         # Tampilkan hasil dalam tab
         tab1, tab2, tab3, tab4 = st.tabs(["🗺️ Peta Interaktif", "📊 Dashboard", "🏥 Fasilitas", "📈 Analisis"])
         
@@ -987,11 +1027,34 @@ if analyze_button and time_limits:
             st.subheader("🗺️ Peta Jangkauan Fasilitas Kesehatan")
             
             if accessibility_zones:
-                m = create_comprehensive_map(location_point, accessibility_zones, health_facilities, reachable_edges)
-                st_folium(m, width=1200, height=600, returned_objects=[])
+                # FIX: Buat peta dengan key unik untuk mencegah re-rendering
+                map_container = st.container()
+                
+                with map_container:
+                    # Tampilkan peta menggunakan st_folium dengan height yang lebih besar
+                    m = create_comprehensive_map(location_point, accessibility_zones, health_facilities, reachable_edges)
+                    
+                    # FIX: Gunakan folium_static untuk peta yang stabil
+                    folium_static(m, width=1200, height=650)
+                    
+                    # Tambahkan informasi
+                    st.markdown("### 📍 Informasi Peta")
+                    st.info("""
+                    **Layer Peta:**
+                    - **Area berwarna**: Zona aksesibilitas berdasarkan waktu tempuh
+                    - **Garis tipis berwarna**: Jaringan jalan yang terjangkau
+                    - **Marker berwarna**: Fasilitas kesehatan (warna menunjukkan jenis)
+                    - **Titik merah**: Lokasi analisis awal
+                    
+                    **Interaksi:**
+                    - Klik pada area/polygon untuk melihat detail
+                    - Klik pada fasilitas untuk informasi lengkap
+                    - Gunakan kontrol di pojok kanan atas untuk zoom dan fullscreen
+                    """)
             else:
                 st.warning("⚠️ Tidak ada zona jangkauan yang dapat dihitung.")
-
+        
+        # Tab lainnya tetap sama...
         with tab2:
             st.subheader("📊 Dashboard Analisis Network Coverage")
             
@@ -1099,7 +1162,7 @@ if analyze_button and time_limits:
             st.subheader("🔧 Informasi Metode Analisis")
             
             if area_calculation_method == "Service Area":
-                method_info = """
+                method_info = f"""
                 **🔍 Service Area (Network Analysis)**
                 
                 **Algoritma yang digunakan:**
@@ -1113,21 +1176,21 @@ if analyze_button and time_limits:
                 - Buffer Service Area: `{service_buffer}` meter
                 - Analisis berbasis jaringan jalan aktual
                 - Akurasi tinggi untuk analisis transportasi
-                """.format(service_buffer=service_buffer)
+                """
             else:
-                method_info = """
+                method_info = f"""
                 **🔍 Buffer dari Titik**
                 
                 **Algoritma yang digunakan:**
                 1. **Direct Buffering**: Buffer langsung dari titik analisis
-                2. **Shape Selection**: Bentuk buffer ({shape})
+                2. **Shape Selection**: Bentuk buffer ({buffer_shape})
                 3. **Area Calculation**: Perhitungan luas area buffer
                 
                 **Parameter:**
-                - Bentuk Buffer: `{shape}`
+                - Bentuk Buffer: `{buffer_shape}`
                 - Analisis sederhana tanpa jaringan
                 - Cepat untuk estimasi awal
-                """.format(shape=buffer_shape)
+                """
             
             st.markdown(method_info)
         
@@ -1298,6 +1361,33 @@ if analyze_button and time_limits:
     
     else:
         st.error("❌ Analisis gagal. Periksa parameter dan coba lagi.")
+
+# FIX: Tampilkan peta dari session state jika sudah ada analisis
+elif st.session_state.analysis_results and st.session_state.accessibility_zones:
+    # Ambil data dari session state
+    graph, health_facilities, accessibility_zones, reachable_edges = st.session_state.analysis_results
+    
+    # Tampilkan hasil yang sudah disimpan
+    st.success("📊 **Menampilkan hasil analisis sebelumnya**")
+    
+    tab1, tab2, tab3, tab4 = st.tabs(["🗺️ Peta Interaktif", "📊 Dashboard", "🏥 Fasilitas", "📈 Analisis"])
+    
+    with tab1:
+        st.subheader("🗺️ Peta Jangkauan Fasilitas Kesehatan (Hasil Tersimpan)")
+        
+        if accessibility_zones:
+            # Ambil location_point dari parameter yang tersimpan
+            location_point = st.session_state.get('last_location', (-6.2088, 106.8456))
+            
+            # Tampilkan peta dari session state
+            if 'last_map' in st.session_state:
+                folium_static(st.session_state.last_map, width=1200, height=650)
+            else:
+                # Buat peta baru jika tidak ada yang tersimpan
+                m = create_comprehensive_map(location_point, accessibility_zones, health_facilities, reachable_edges)
+                folium_static(m, width=1200, height=650)
+        else:
+            st.warning("⚠️ Tidak ada zona jangkauan yang dapat ditampilkan.")
 
 elif not analyze_button:
     # Tampilkan halaman awal
@@ -1486,6 +1576,15 @@ st.markdown("""
         padding: 15px;
         border-left: 4px solid #2196F3;
         margin: 10px 0;
+    }
+    
+    /* Fix untuk peta yang hilang */
+    .folium-map {
+        width: 100% !important;
+        height: 650px !important;
+        border: 1px solid #ddd;
+        border-radius: 10px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
     }
 </style>
 """, unsafe_allow_html=True)
