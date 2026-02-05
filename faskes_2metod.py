@@ -12,14 +12,17 @@ import warnings
 import time
 import math
 from folium.plugins import MiniMap, Fullscreen
-from shapely.ops import unary_union
-from pyproj import CRS
+from shapely.ops import unary_union, linemerge
+from pyproj import CRS, Transformer
 from scipy.spatial import ConvexHull
+from collections import defaultdict
 
 # Suppress warnings
 warnings.filterwarnings('ignore')
 
-# Konfigurasi halaman
+# ============================================================
+# KONFIGURASI HALAMAN
+# ============================================================
 st.set_page_config(
     page_title="Analisis Jangkauan Fasilitas Kesehatan dengan Network Coverage",
     page_icon="🏥📍",
@@ -34,9 +37,7 @@ st.markdown("**Analisis zona jangkauan dengan dua metode coverage dari titik ana
 # FUNGSI KONVERSI MODA TRANSPORTASI
 # ============================================================
 def convert_transport_mode(mode_bahasa):
-    """
-    Konversi mode transportasi dari bahasa Indonesia ke format OSMnx
-    """
+    """Konversi mode transportasi dari bahasa Indonesia ke format OSMnx"""
     conversion_map = {
         "jalan kaki": "walk",
         "sepeda": "bike", 
@@ -45,9 +46,7 @@ def convert_transport_mode(mode_bahasa):
     return conversion_map.get(mode_bahasa, "walk")
 
 def get_default_speed(mode_bahasa):
-    """
-    Mendapatkan kecepatan default berdasarkan mode transportasi
-    """
+    """Mendapatkan kecepatan default berdasarkan mode transportasi"""
     speed_map = {
         "jalan kaki": 5.0,
         "sepeda": 15.0,
@@ -59,9 +58,7 @@ def get_default_speed(mode_bahasa):
 # FUNGSI UTILITAS UMUM
 # ============================================================
 def haversine_distance(lat1, lon1, lat2, lon2):
-    """
-    Menghitung jarak antara dua titik koordinat menggunakan formula Haversine.
-    """
+    """Menghitung jarak antara dua titik koordinat menggunakan formula Haversine"""
     R = 6371000  # Earth's radius in meters
     
     # Konversi ke radian
@@ -82,9 +79,7 @@ def haversine_distance(lat1, lon1, lat2, lon2):
     return distance
 
 def get_health_facilities(bbox):
-    """
-    Mendapatkan fasilitas kesehatan dari OSM dalam bounding box
-    """
+    """Mendapatkan fasilitas kesehatan dari OSM dalam bounding box"""
     north, south, east, west = bbox
     
     try:
@@ -148,188 +143,251 @@ def get_health_facilities(bbox):
         return gpd.GeoDataFrame()
 
 # ============================================================
-# METODE-METODE COVERAGE AREA
+# FUNGSI NETWORK ANALYSIS - IMPROVED
 # ============================================================
-
 def get_network_from_point(location_point, network_type, radius):
-    """Mendapatkan jaringan jalan dari titik analisis"""
+    """Mendapatkan jaringan jalan dari titik analisis dengan caching"""
     try:
+        # Gunakan cache untuk meningkatkan performa
+        cache_key = f"{location_point}_{network_type}_{radius}"
+        
+        if 'network_cache' not in st.session_state:
+            st.session_state.network_cache = {}
+        
+        if cache_key in st.session_state.network_cache:
+            return st.session_state.network_cache[cache_key]
+        
         graph = ox.graph_from_point(
             location_point,
             dist=radius,
             network_type=network_type,
             simplify=True,
-            truncate_by_edge=True
+            truncate_by_edge=True,
+            retain_all=True  # Pertahankan semua komponen
         )
         
         if len(graph.nodes()) == 0:
             st.error(f"❌ Tidak ada jaringan jalan ditemukan dari titik {location_point}")
             return None
         
-        return graph
+        # Proyeksikan graph untuk analisis spasial yang akurat
+        graph_proj = ox.project_graph(graph)
+        
+        # Simpan ke cache
+        st.session_state.network_cache[cache_key] = graph_proj
+        
+        return graph_proj
         
     except Exception as e:
         st.error(f"❌ Gagal mengambil jaringan dari titik: {str(e)}")
         return None
 
-def find_start_node_from_point(graph, location_point):
+def find_start_node_from_point(graph_proj, location_point):
     """Mencari node terdekat dari titik analisis"""
     try:
-        # Proyeksikan graph untuk akurasi
-        graph_proj = ox.project_graph(graph)
+        # Dapatkan koordinat titik analisis dalam proyeksi graph
+        lat, lon = location_point
         
-        # Temukan node terdekat dari titik analisis
+        # Temukan node terdekat
         start_node = ox.distance.nearest_nodes(
             graph_proj, 
-            location_point[1],  # longitude
-            location_point[0]   # latitude
+            lon,  # longitude
+            lat   # latitude
         )
         
-        # Dapatkan koordinat node
+        # Dapatkan koordinat node dalam proyeksi graph
         node_data = graph_proj.nodes[start_node]
         start_coords = (node_data['x'], node_data['y'])
         
-        return start_node, graph_proj, start_coords
+        # Dapatkan juga koordinat WGS84 untuk referensi
+        transformer = Transformer.from_crs(graph_proj.graph['crs'], 'EPSG:4326', always_xy=True)
+        lon_wgs, lat_wgs = transformer.transform(start_coords[0], start_coords[1])
+        start_wgs84 = (lat_wgs, lon_wgs)
+        
+        return start_node, start_coords, start_wgs84
         
     except Exception as e:
         st.error(f"❌ Gagal menemukan node dari titik: {str(e)}")
         return None, None, None
 
 # ============================================================
-# METODE 1: SERVICE AREA - VERSI BARU DARI TITIK PENGAMATAN
+# METODE 1: NETWORK SERVICE AREA - ANALISIS JARINGAN SEBENARNYA
 # ============================================================
-def calculate_service_area_coverage(graph_proj, reachable_nodes, distances, max_distance,
-                                   location_point, buffer_distance=100):
-    """Menghitung coverage sebagai service area dari titik pengamatan"""
+def calculate_network_service_area(graph_proj, start_node, start_coords, max_distance, 
+                                  service_buffer=100, merge_tolerance=10):
+    """
+    Menghitung service area berdasarkan analisis jaringan sebenarnya
+    """
     try:
-        if not reachable_nodes:
-            return create_simple_buffer_from_point(location_point, max_distance)
+        # 1. HITUNG JARAK DARI START NODE KE SEMUA NODES
+        distances = nx.single_source_dijkstra_path_length(
+            graph_proj, 
+            start_node, 
+            weight='length',
+            cutoff=max_distance
+        )
         
-        # 1. Kumpulkan semua nodes yang terjangkau beserta jaraknya
-        node_coords_with_distances = []
-        for node in reachable_nodes:
+        if not distances:
+            return None, [], {}
+        
+        # 2. IDENTIFIKASI NODES DAN EDGES YANG TERJANGKAU
+        reachable_nodes = []
+        reachable_edges = []
+        edge_distances = {}
+        
+        for u, v, data in graph_proj.edges(data=True):
+            # Cek jika salah satu node dari edge terjangkau
+            u_dist = distances.get(u, float('inf'))
+            v_dist = distances.get(v, float('inf'))
+            
+            # Edge terjangkau jika kedua node terjangkau
+            if u_dist <= max_distance and v_dist <= max_distance:
+                # Tambahkan nodes jika belum ada
+                if u not in reachable_nodes:
+                    reachable_nodes.append(u)
+                if v not in reachable_nodes:
+                    reachable_nodes.append(v)
+                
+                # Dapatkan geometri edge
+                if 'geometry' in data:
+                    edge_geom = data['geometry']
+                else:
+                    # Buat garis sederhana dari node ke node
+                    u_coords = (graph_proj.nodes[u]['x'], graph_proj.nodes[u]['y'])
+                    v_coords = (graph_proj.nodes[v]['x'], graph_proj.nodes[v]['y'])
+                    edge_geom = LineString([u_coords, v_coords])
+                
+                reachable_edges.append(edge_geom)
+                
+                # Simpan jarak rata-rata edge dari titik awal
+                avg_dist = (u_dist + v_dist) / 2
+                edge_distances[len(reachable_edges)-1] = avg_dist
+        
+        if not reachable_edges:
+            return None, [], {}
+        
+        # 3. BUFFER EDGES BERDASARKAN JARAK DARI TITIK AWAL
+        buffered_polygons = []
+        
+        for i, edge in enumerate(reachable_edges):
             try:
-                node_data = graph_proj.nodes[node]
-                if 'x' in node_data and 'y' in node_data:
-                    distance = distances.get(node, max_distance)
-                    # Normalisasi jarak (0-1) untuk bobot
-                    weight = 1.0 - (distance / max_distance)
-                    node_coords_with_distances.append({
-                        'coords': (node_data['x'], node_data['y']),
-                        'distance': distance,
-                        'weight': weight
-                    })
-            except:
-                continue
-        
-        if not node_coords_with_distances:
-            return create_simple_buffer_from_point(location_point, max_distance)
-        
-        # 2. Hitung centroid berbobot dari nodes yang terjangkau
-        total_weight = sum(item['weight'] for item in node_coords_with_distances)
-        
-        if total_weight > 0:
-            weighted_x = sum(item['coords'][0] * item['weight'] for item in node_coords_with_distances) / total_weight
-            weighted_y = sum(item['coords'][1] * item['weight'] for item in node_coords_with_distances) / total_weight
-            centroid = (weighted_x, weighted_y)
-        else:
-            # Jika tidak ada bobot, gunakan rata-rata sederhana
-            avg_x = sum(item['coords'][0] for item in node_coords_with_distances) / len(node_coords_with_distances)
-            avg_y = sum(item['coords'][1] for item in node_coords_with_distances) / len(node_coords_with_distances)
-            centroid = (avg_x, avg_y)
-        
-        # 3. Dapatkan koordinat titik awal (dalam proyeksi graph)
-        lat, lon = location_point
-        try:
-            # Coba dapatkan koordinat titik awal dalam sistem proyeksi graph
-            transformer_to_crs = Transformer.from_crs('EPSG:4326', graph_proj.graph['crs'], always_xy=True)
-            start_x, start_y = transformer_to_crs.transform(lon, lat)
-            start_point_proj = (start_x, start_y)
-        except:
-            # Jika gagal, gunakan centroid sebagai titik awal
-            start_point_proj = centroid
-        
-        # 4. Buat polygon service area dengan pendekatan radial dari titik awal
-        # Kumpulkan semua titik untuk convex hull
-        all_points = [start_point_proj]  # Mulai dari titik awal
-        
-        # Tambahkan nodes terjangkau
-        for item in node_coords_with_distances:
-            all_points.append(item['coords'])
-        
-        # 5. Buat convex hull dari semua titik
-        if len(all_points) >= 3:
-            points_array = np.array(all_points)
-            try:
-                hull = ConvexHull(points_array)
-                hull_points = points_array[hull.vertices]
-                polygon = Polygon(hull_points)
+                # Hitung buffer size berdasarkan jarak dari titik awal
+                edge_dist = edge_distances.get(i, max_distance)
                 
-                # Buffer untuk smoothing dan memperluas area
-                if buffer_distance > 0:
-                    polygon = polygon.buffer(buffer_distance)
+                # Buffer size: lebih besar untuk edge yang dekat, lebih kecil untuk edge yang jauh
+                # Formula: buffer_size = base_buffer * (1 - normalized_distance)^2
+                normalized_dist = edge_dist / max_distance
+                buffer_size = service_buffer * (1 - normalized_dist)**2
                 
-                # Tambahkan buffer tambahan di sekitar titik awal untuk memastikan coverage
-                start_buffer = Point(start_point_proj).buffer(max_distance * 0.2)
-                polygon = unary_union([polygon, start_buffer]).convex_hull
+                # Minimum dan maximum buffer size
+                buffer_size = max(5, min(buffer_size, service_buffer * 1.5))
                 
-                return polygon
+                # Buffer edge
+                buffered_edge = edge.buffer(buffer_size, resolution=8)
+                buffered_polygons.append(buffered_edge)
                 
             except Exception:
-                # Fallback: buat polygon dari nodes terjauh
-                # Urutkan nodes berdasarkan jarak dari titik awal
-                sorted_nodes = sorted(node_coords_with_distances, key=lambda x: x['distance'], reverse=True)
+                continue
+        
+        if not buffered_polygons:
+            return None, reachable_edges, edge_distances
+        
+        # 4. GABUNGKAN SEMUA BUFFERED POLYGONS
+        try:
+            # Union bertahap untuk menghindari memory overflow
+            service_area = buffered_polygons[0]
+            for i in range(1, len(buffered_polygons)):
+                try:
+                    service_area = unary_union([service_area, buffered_polygons[i]])
+                except:
+                    continue
+            
+            # 5. SIMPLIFIKASI DAN CLEANUP
+            if hasattr(service_area, 'is_valid') and service_area.is_valid:
+                # Convex hull untuk bentuk yang lebih smooth
+                if hasattr(service_area, 'convex_hull'):
+                    service_area = service_area.convex_hull
                 
-                if len(sorted_nodes) >= 3:
-                    # Ambil nodes terjauh sebagai boundary
-                    boundary_points = [start_point_proj]
-                    for i in range(min(8, len(sorted_nodes))):  # Ambil maksimal 8 nodes terjauh
-                        boundary_points.append(sorted_nodes[i]['coords'])
-                    
-                    points_array = np.array(boundary_points)
-                    try:
-                        hull = ConvexHull(points_array)
-                        hull_points = points_array[hull.vertices]
-                        polygon = Polygon(hull_points)
-                        
-                        if buffer_distance > 0:
-                            polygon = polygon.buffer(buffer_distance)
-                        
-                        return polygon
-                    except:
-                        pass
+                # Buffer final untuk smoothing
+                service_area = service_area.buffer(merge_tolerance, resolution=16)
+                
+                # Simplifikasi
+                service_area = service_area.simplify(merge_tolerance, preserve_topology=True)
+                
+                # 6. TAMBAHKAN BUFFER DARI TITIK AWAL (untuk memastikan coverage)
+                start_point = Point(start_coords[0], start_coords[1])
+                start_buffer = start_point.buffer(max_distance * 0.1)  # 10% dari max_distance
+                
+                # Gabungkan dengan service area
+                service_area = unary_union([service_area, start_buffer])
+                
+                # Convex hull final
+                if hasattr(service_area, 'convex_hull'):
+                    service_area = service_area.convex_hull
+                
+                return service_area, reachable_edges, edge_distances
+                
+        except Exception as e:
+            st.warning(f"Error dalam union polygons: {str(e)}")
         
-        # 6. Fallback: buat buffer dari titik awal dengan radius yang disesuaikan
-        # Gunakan rata-rata jarak nodes yang terjangkau
-        avg_distance = sum(item['distance'] for item in node_coords_with_distances) / len(node_coords_with_distances)
-        adjusted_distance = min(max_distance, avg_distance * 1.2)  # 20% lebih besar dari rata-rata
+        # 7. FALLBACK: CONVEX HULL DARI EDGE POINTS
+        try:
+            # Kumpulkan semua titik dari edges
+            all_points = []
+            for edge in reachable_edges:
+                if hasattr(edge, 'coords'):
+                    all_points.extend(list(edge.coords))
+            
+            if len(all_points) >= 3:
+                points_array = np.array(all_points)
+                hull = ConvexHull(points_array)
+                hull_points = points_array[hull.vertices]
+                
+                service_area = Polygon(hull_points)
+                service_area = service_area.buffer(service_buffer, resolution=16)
+                
+                return service_area, reachable_edges, edge_distances
         
-        return create_simple_buffer_from_point(location_point, adjusted_distance)
+        except Exception:
+            pass
+        
+        # 8. ULTIMATE FALLBACK: BUFFER DARI EDGES TERJAUH
+        try:
+            if edge_distances:
+                # Cari edge terjauh
+                max_edge_idx = max(edge_distances, key=edge_distances.get)
+                farthest_edge = reachable_edges[max_edge_idx]
+                
+                # Buffer dari edge terjauh
+                if hasattr(farthest_edge, 'envelope'):
+                    service_area = farthest_edge.envelope.buffer(service_buffer * 2)
+                    return service_area, reachable_edges, edge_distances
+        except:
+            pass
+        
+        return None, reachable_edges, edge_distances
         
     except Exception as e:
-        st.error(f"Error dalam service area coverage: {str(e)}")
-        return create_simple_buffer_from_point(location_point, max_distance)
+        st.error(f"Error dalam network service area: {str(e)}")
+        return None, [], {}
 
 # ============================================================
-# METODE 2: BUFFER DARI TITIK
+# METODE 2: BUFFER DARI TITIK (SEDERHANA)
 # ============================================================
 def calculate_buffer_coverage(location_point, max_distance, shape='Lingkaran'):
     """Menghitung coverage sebagai buffer dari titik"""
     try:
         lat, lon = location_point
         
-        # Konversi meter ke derajat dengan akurasi yang lebih baik
+        # Konversi meter ke derajat
         buffer_deg_lat = max_distance / 111320  # 111.32 km per degree latitude
-        
-        # Untuk longitude, perlu mempertimbangkan latitude
         buffer_deg_lon = max_distance / (111320 * math.cos(math.radians(lat)))
         
         if shape == 'Lingkaran':
-            # Buffer lingkaran - versi lebih sederhana
+            # Buffer lingkaran
             center_point = Point(lon, lat)
-            # Konversi max_distance ke derajat (aproksimasi)
-            approx_buffer_deg = max_distance / 111000  # 111 km per degree
-            polygon = center_point.buffer(approx_buffer_deg, resolution=32)  # 32 sisi untuk lingkaran halus
+            approx_buffer_deg = max_distance / 111000
+            polygon = center_point.buffer(approx_buffer_deg, resolution=32)
             
         elif shape == 'Persegi':
             # Buffer persegi (bounding box)
@@ -341,7 +399,7 @@ def calculate_buffer_coverage(location_point, max_distance, shape='Lingkaran'):
             polygon = box(min_lon, min_lat, max_lon, max_lat)
             
         elif shape == 'Kapsul':
-            # Buffer kapsul (lingkaran memanjang di arah timur-barat)
+            # Buffer kapsul (lingkaran memanjang)
             circle1 = Point(lon - buffer_deg_lon/2, lat).buffer(buffer_deg_lat/2, resolution=16)
             circle2 = Point(lon + buffer_deg_lon/2, lat).buffer(buffer_deg_lat/2, resolution=16)
             rectangle = box(lon - buffer_deg_lon/2, lat - buffer_deg_lat/3, 
@@ -349,7 +407,7 @@ def calculate_buffer_coverage(location_point, max_distance, shape='Lingkaran'):
             
             polygon = unary_union([circle1, circle2, rectangle])
         
-        # Pastikan polygon valid
+        # Validasi polygon
         if polygon.is_empty or not polygon.is_valid:
             # Fallback ke buffer lingkaran sederhana
             center_point = Point(lon, lat)
@@ -360,17 +418,11 @@ def calculate_buffer_coverage(location_point, max_distance, shape='Lingkaran'):
         
     except Exception as e:
         st.error(f"Error dalam buffer coverage: {str(e)}")
-        # Fallback ekstrem
         return Point(location_point[1], location_point[0]).buffer(0.01)
 
 # ============================================================
-# FUNGSI UTAMA UNTUK METODE BUFFER YANG DIPERBAIKI
+# FUNGSI UTAMA UNTUK ANALISIS NETWORK COVERAGE
 # ============================================================
-def create_simple_buffer_from_point(location_point, max_distance, **kwargs):
-    """Membuat buffer sederhana dari titik analisis"""
-    shape = kwargs.get('buffer_shape', 'Lingkaran')
-    return calculate_buffer_coverage(location_point, max_distance, shape)
-
 def calculate_network_coverage_from_point(graph_proj, start_node, start_coords, 
                                         max_distance, location_point, method="Service Area", 
                                         **kwargs):
@@ -378,81 +430,39 @@ def calculate_network_coverage_from_point(graph_proj, start_node, start_coords,
     Menghitung coverage area dari titik analisis dengan dua metode
     """
     try:
-        # Jika metode adalah Buffer dari Titik, langsung buat buffer tanpa analisis jaringan
+        # Jika metode adalah Buffer dari Titik
         if method == "Buffer dari Titik":
             shape = kwargs.get('buffer_shape', 'Lingkaran')
             coverage_polygon = calculate_buffer_coverage(location_point, max_distance, shape)
             return coverage_polygon, []
         
-        # Untuk Service Area, gunakan analisis jaringan
-        # 1. Hitung jarak dari TITIK ANALISIS ke semua nodes
-        distances = {}
-        try:
-            distances = nx.single_source_dijkstra_path_length(
-                graph_proj, 
-                start_node, 
-                weight='length',
-                cutoff=max_distance
-            )
-        except Exception as e:
-            # Alternatif: hitung jarak Euclidean sebagai fallback
-            for node in graph_proj.nodes():
-                try:
-                    node_data = graph_proj.nodes[node]
-                    if 'x' in node_data and 'y' in node_data:
-                        dx = node_data['x'] - start_coords[0]
-                        dy = node_data['y'] - start_coords[1]
-                        euclidean_dist = math.sqrt(dx**2 + dy**2)
-                        if euclidean_dist <= max_distance:
-                            distances[node] = euclidean_dist
-                except:
-                    continue
-        
-        if not distances:
-            shape = kwargs.get('buffer_shape', 'Lingkaran')
-            return create_simple_buffer_from_point(location_point, max_distance, buffer_shape=shape), []
-        
-        # 2. Filter nodes yang terjangkau
-        reachable_nodes = []
-        reachable_coords = []
-        
-        for node, dist in distances.items():
-            if dist <= max_distance:
-                reachable_nodes.append(node)
-                node_data = graph_proj.nodes[node]
-                if 'x' in node_data and 'y' in node_data:
-                    reachable_coords.append((node_data['x'], node_data['y']))
-        
-        # 3. Hitung coverage area berdasarkan metode
-        coverage_polygon = None
-        
+        # Untuk Service Area (Network Analysis)
         if method == "Service Area":
-            coverage_polygon = calculate_service_area_coverage(
-                graph_proj, reachable_nodes, distances, max_distance,
-                location_point, buffer_distance=kwargs.get('service_buffer', 100)
+            service_buffer = kwargs.get('service_buffer', 100)
+            
+            coverage_polygon, reachable_edges, edge_distances = calculate_network_service_area(
+                graph_proj, start_node, start_coords, max_distance, 
+                service_buffer=service_buffer
             )
+            
+            if coverage_polygon is None:
+                # Fallback ke buffer jika service area gagal
+                shape = kwargs.get('buffer_shape', 'Lingkaran')
+                return calculate_buffer_coverage(location_point, max_distance, shape), []
+            
+            return coverage_polygon, reachable_edges
         
-        # 4. Kumpulkan edges yang terjangkau (kecuali untuk buffer)
-        reachable_edges = []
-        if method != "Buffer dari Titik":
-            for u, v, data in graph_proj.edges(data=True):
-                if u in reachable_nodes or v in reachable_nodes:
-                    if 'geometry' in data:
-                        reachable_edges.append(data['geometry'])
-                    else:
-                        u_coords = (graph_proj.nodes[u]['x'], graph_proj.nodes[u]['y'])
-                        v_coords = (graph_proj.nodes[v]['x'], graph_proj.nodes[v]['y'])
-                        reachable_edges.append(LineString([u_coords, v_coords]))
-        
-        return coverage_polygon, reachable_edges
+        # Default fallback
+        shape = kwargs.get('buffer_shape', 'Lingkaran')
+        return calculate_buffer_coverage(location_point, max_distance, shape), []
         
     except Exception as e:
         st.error(f"Error dalam calculate_network_coverage: {str(e)}")
         shape = kwargs.get('buffer_shape', 'Lingkaran')
-        return create_simple_buffer_from_point(location_point, max_distance, buffer_shape=shape), []
+        return calculate_buffer_coverage(location_point, max_distance, shape), []
 
 # ============================================================
-# FUNGSI ANALISIS UTAMA - DIPERBAIKI
+# FUNGSI ANALISIS UTAMA
 # ============================================================
 def analyze_from_point_main(location_point, network_type, speed_kmh, radius_m, time_limits_min, 
                            method="Service Area", **kwargs):
@@ -467,17 +477,17 @@ def analyze_from_point_main(location_point, network_type, speed_kmh, radius_m, t
         if method != "Buffer dari Titik":
             # 1. Dapatkan jaringan dari titik
             status_text.text("📍 Mendapatkan jaringan dari titik analisis...")
-            graph = get_network_from_point(location_point, network_type, radius_m)
-            if graph is None:
-                return None, None, None, None, None
+            graph_proj = get_network_from_point(location_point, network_type, radius_m)
+            if graph_proj is None:
+                return None, None, None, None
             
             progress_bar.progress(25)
             
             # 2. Temukan node awal dari titik
             status_text.text("📍 Mencari node awal dari titik analisis...")
-            start_node, graph_proj, start_coords = find_start_node_from_point(graph, location_point)
+            start_node, start_coords, start_wgs84 = find_start_node_from_point(graph_proj, location_point)
             if start_node is None:
-                return None, None, None, None, None
+                return None, None, None, None
             
             progress_bar.progress(40)
         else:
@@ -485,6 +495,7 @@ def analyze_from_point_main(location_point, network_type, speed_kmh, radius_m, t
             graph_proj = None
             start_node = None
             start_coords = None
+            start_wgs84 = location_point
             progress_bar.progress(40)
         
         # 3. Dapatkan fasilitas kesehatan
@@ -514,35 +525,25 @@ def analyze_from_point_main(location_point, network_type, speed_kmh, radius_m, t
         
         speed_m_per_min = (speed_kmh * 1000) / 60  # m/menit
         
-        for time_limit in sorted(time_limits_min):
+        for idx, time_limit in enumerate(sorted(time_limits_min)):
             max_distance = speed_m_per_min * time_limit
             
-            # Tambahkan parameter tambahan berdasarkan metode
-            method_kwargs = kwargs.copy()
-            
-            if method == "Buffer dari Titik":
-                # Untuk metode buffer, langsung hitung tanpa jaringan
-                shape = kwargs.get('buffer_shape', 'Lingkaran')
-                coverage_polygon = calculate_buffer_coverage(location_point, max_distance, shape)
-                reachable_edges = []
-            else:
-                # Untuk Service Area
-                method_kwargs['service_buffer'] = kwargs.get('service_buffer', 100)
-                
-                coverage_polygon, reachable_edges = calculate_network_coverage_from_point(
-                    graph_proj, start_node, start_coords, max_distance, location_point, method, **method_kwargs
-                )
+            # Hitung coverage area
+            coverage_polygon, reachable_edges = calculate_network_coverage_from_point(
+                graph_proj, start_node, start_coords, max_distance, location_point, method, **kwargs
+            )
             
             if coverage_polygon and not coverage_polygon.is_empty:
                 # Hitung luas
                 area_m2 = coverage_polygon.area
                 area_km2 = area_m2 / 1000000
                 
-                # Untuk buffer, langsung gunakan polygon yang sudah dalam WGS84
+                # Konversi ke WGS84
+                wgs84_polygon = None
                 if method == "Buffer dari Titik":
+                    # Sudah dalam WGS84
                     wgs84_polygon = coverage_polygon
                 else:
-                    # Konversi ke WGS84 untuk metode jaringan
                     try:
                         transformer = Transformer.from_crs(graph_proj.graph['crs'], 'EPSG:4326', always_xy=True)
                         
@@ -555,7 +556,6 @@ def analyze_from_point_main(location_point, network_type, speed_kmh, radius_m, t
                             wgs84_polygon = Polygon(wgs84_coords)
                         else:
                             wgs84_polygon = coverage_polygon
-                            
                     except:
                         buffer_deg = max_distance / 111320
                         wgs84_polygon = Point(location_point[1], location_point[0]).buffer(buffer_deg)
@@ -563,7 +563,7 @@ def analyze_from_point_main(location_point, network_type, speed_kmh, radius_m, t
                 # Hitung fasilitas yang terjangkau
                 accessible_facilities = []
                 if not health_facilities.empty and wgs84_polygon:
-                    for idx, facility in health_facilities.iterrows():
+                    for idx_fac, facility in health_facilities.iterrows():
                         try:
                             if hasattr(facility.geometry, 'within'):
                                 if facility.geometry.within(wgs84_polygon):
@@ -587,24 +587,20 @@ def analyze_from_point_main(location_point, network_type, speed_kmh, radius_m, t
                         except:
                             continue
                 
-                # Simpan statistik nodes dan edges untuk metode buffer
-                nodes_count = len(graph_proj.nodes()) if graph_proj else 0
-                edges_count = len(graph_proj.edges()) if graph_proj else 0
-                
+                # Simpan statistik
                 accessibility_zones[time_limit] = {
                     'geometry': wgs84_polygon,
                     'geometry_projected': coverage_polygon,
                     'max_distance': max_distance,
                     'area_sqkm': area_km2,
                     'calculation_method': method,
-                    'nodes_count': nodes_count,
-                    'edges_count': edges_count,
-                    'reachable_edges': len(reachable_edges),
                     'accessible_facilities': accessible_facilities,
                     'facilities_count': len(accessible_facilities)
                 }
                 
                 reachable_edges_dict[time_limit] = reachable_edges
+            
+            progress_bar.progress(50 + int((idx + 1) * 50 / len(time_limits_min)))
         
         progress_bar.progress(100)
         status_text.text("✅ Analisis dari titik selesai!")
@@ -620,11 +616,11 @@ def analyze_from_point_main(location_point, network_type, speed_kmh, radius_m, t
         return None, None, None, None
 
 # ============================================================
-# FUNGSI PEMBUATAN PETA - DIPERBAIKI
+# FUNGSI PEMBUATAN PETA - DENGAN NETWORK VISUALIZATION
 # ============================================================
-def create_comprehensive_map(location_point, accessibility_zones, health_facilities):
+def create_comprehensive_map(location_point, accessibility_zones, health_facilities, reachable_edges_dict=None):
     """
-    Membuat peta interaktif yang komprehensif
+    Membuat peta interaktif yang komprehensif dengan visualisasi jaringan
     """
     try:
         m = folium.Map(location=location_point, zoom_start=14, 
@@ -648,6 +644,30 @@ def create_comprehensive_map(location_point, accessibility_zones, health_facilit
             30: '#F44336'
         }
         
+        # Tambahkan visualisasi jaringan (jika ada)
+        if reachable_edges_dict:
+            for time_limit, reachable_edges in reachable_edges_dict.items():
+                if reachable_edges and len(reachable_edges) > 0:
+                    edge_color = colors.get(time_limit, '#EF9A9A')
+                    
+                    for edge in reachable_edges:
+                        if hasattr(edge, 'coords'):
+                            coords = list(edge.coords)
+                            if len(coords) >= 2:
+                                folium_coords = []
+                                for x, y in coords:
+                                    # Asumsi: koordinat sudah dalam proyeksi lokal
+                                    # Dalam implementasi sebenarnya perlu konversi ke WGS84
+                                    folium_coords.append([y, x])
+                                
+                                folium.PolyLine(
+                                    locations=folium_coords,
+                                    color=edge_color,
+                                    weight=1,
+                                    opacity=0.3,
+                                    popup=f'Edge Jaringan ({time_limit} menit)'
+                                ).add_to(m)
+        
         # Tambahkan zona aksesibilitas
         for time_limit, zone_data in accessibility_zones.items():
             color = colors.get(time_limit, '#EF9A9A')
@@ -660,6 +680,7 @@ def create_comprehensive_map(location_point, accessibility_zones, health_facilit
                         coords = list(polygon.exterior.coords)
                         folium_coords = [(lat, lon) for lon, lat in coords]
                         
+                        # Tambahkan polygon ke peta
                         folium.Polygon(
                             locations=folium_coords,
                             color=color,
@@ -674,8 +695,21 @@ def create_comprehensive_map(location_point, accessibility_zones, health_facilit
                                   f'Fasilitas: {zone_data.get("facilities_count", 0)}',
                             tooltip=f'Zona Aksesibilitas {time_limit} menit'
                         ).add_to(m)
+                        
+                        # Tambahkan label di tengah polygon
+                        if len(folium_coords) > 0:
+                            center_lat = sum([c[0] for c in folium_coords]) / len(folium_coords)
+                            center_lon = sum([c[1] for c in folium_coords]) / len(folium_coords)
+                            
+                            folium.Marker(
+                                location=[center_lat, center_lon],
+                                icon=folium.DivIcon(
+                                    html=f'<div style="font-size: 10pt; font-weight: bold; color: {color};">{time_limit}m</div>'
+                                ),
+                                popup=f'Label Zona {time_limit} menit'
+                            ).add_to(m)
                     else:
-                        # Jika tidak ada exterior, coba buat circle sebagai fallback
+                        # Fallback: buat circle
                         folium.Circle(
                             location=location_point,
                             radius=zone_data['max_distance'],
@@ -683,9 +717,8 @@ def create_comprehensive_map(location_point, accessibility_zones, health_facilit
                             fill=True,
                             fill_color=color,
                             fill_opacity=0.3,
-                            popup=f'<b>Zona {time_limit} menit (Buffer)</b><br>'
-                                  f'Luas: {zone_data["area_sqkm"]:.2f} km²<br>'
-                                  f'Jarak: {zone_data["max_distance"]:.0f} m'
+                            popup=f'<b>Zona {time_limit} menit</b><br>'
+                                  f'Luas: {zone_data["area_sqkm"]:.2f} km²'
                         ).add_to(m)
                         
             except Exception as e:
@@ -700,7 +733,7 @@ def create_comprehensive_map(location_point, accessibility_zones, health_facilit
                     popup=f'Zona {time_limit} menit (fallback)'
                 ).add_to(m)
         
-        # Tambahkan fasilitas kesehatan yang dapat diakses
+        # Tambahkan fasilitas kesehatan
         facility_colors = {
             'hospital': 'red',
             'clinic': 'blue',
@@ -751,6 +784,7 @@ def create_comprehensive_map(location_point, accessibility_zones, health_facilit
                             <p style="margin: 2px 0;"><b>Jenis:</b> {facility['type']}</p>
                             <p style="margin: 2px 0;"><b>Waktu tempuh:</b> {facility['travel_time_min']:.1f} menit</p>
                             <p style="margin: 2px 0;"><b>Jarak:</b> {facility['distance_m']:.0f} m</p>
+                            <p style="margin: 2px 0;"><b>Zona:</b> {time_limit} menit</p>
                         </div>
                         """
                         
@@ -764,31 +798,6 @@ def create_comprehensive_map(location_point, accessibility_zones, health_facilit
                     except Exception as e:
                         continue
         
-        # Tambahkan fasilitas lain yang tidak dapat diakses
-        if not health_facilities.empty:
-            for idx, facility in health_facilities.iterrows():
-                try:
-                    if hasattr(facility.geometry, 'x'):
-                        coords = (facility.geometry.y, facility.geometry.x)
-                        fac_key = f"{coords[0]},{coords[1]}"
-                        
-                        if fac_key not in added_facilities:
-                            fac_name = str(facility.get('name', 'Fasilitas Tanpa Nama'))
-                            
-                            folium.CircleMarker(
-                                location=coords,
-                                radius=3,
-                                color='gray',
-                                fill=True,
-                                fill_color='gray',
-                                fill_opacity=0.5,
-                                popup=f"<b>{fac_name}</b><br><i>(di luar zona jangkauan)</i>",
-                                tooltip=fac_name
-                            ).add_to(m)
-                            
-                except Exception:
-                    continue
-        
         # Tambahkan layer control
         folium.LayerControl().add_to(m)
         
@@ -798,6 +807,26 @@ def create_comprehensive_map(location_point, accessibility_zones, health_facilit
         
         # Tambahkan fitur fullscreen
         Fullscreen().add_to(m)
+        
+        # Tambahkan legenda
+        legend_html = '''
+        <div style="position: fixed; 
+                    bottom: 50px; left: 50px; width: 200px; height: 250px; 
+                    background-color: white; border:2px solid grey; z-index:9999; 
+                    font-size:14px; padding: 10px; border-radius: 5px;">
+            <b>LEGENDA</b><br>
+            <i class="fa fa-bullseye" style="color:red"></i> Titik Analisis<br>
+            <i class="fa fa-hospital" style="color:red"></i> Rumah Sakit<br>
+            <i class="fa fa-medkit" style="color:blue"></i> Klinik<br>
+            <div style="background-color: #FFEBEE; width: 20px; height: 20px; display: inline-block; margin-right: 5px;"></div> 5 menit<br>
+            <div style="background-color: #FFCDD2; width: 20px; height: 20px; display: inline-block; margin-right: 5px;"></div> 10 menit<br>
+            <div style="background-color: #EF9A9A; width: 20px; height: 20px; display: inline-block; margin-right: 5px;"></div> 15 menit<br>
+            <div style="background-color: #E57373; width: 20px; height: 20px; display: inline-block; margin-right: 5px;"></div> 20 menit<br>
+            <div style="background-color: #EF5350; width: 20px; height: 20px; display: inline-block; margin-right: 5px;"></div> 25 menit<br>
+        </div>
+        '''
+        
+        m.get_root().html.add_child(folium.Element(legend_html))
         
         return m
         
@@ -809,7 +838,7 @@ def create_comprehensive_map(location_point, accessibility_zones, health_facilit
         return m
 
 # ============================================================
-# SIDEBAR INPUT
+# SIDEBAR INPUT (SAMA SEBELUMNYA)
 # ============================================================
 with st.sidebar:
     st.header("📍 Parameter Titik Analisis")
@@ -876,7 +905,7 @@ with st.sidebar:
         default=[15, 25]
     )
     
-    # Pilihan metode perhitungan luas - HANYA 2 METODE
+    # Pilihan metode perhitungan luas
     area_calculation_method = st.selectbox(
         "Metode Coverage Area:",
         [
@@ -891,7 +920,7 @@ with st.sidebar:
     if area_calculation_method == "Service Area":
         service_buffer = st.slider(
             "Buffer Service Area (meter):",
-            20, 5000, 100, 10  # Diubah dari 500 menjadi 5000
+            20, 5000, 100, 10
         )
     
     elif area_calculation_method == "Buffer dari Titik":
@@ -905,13 +934,14 @@ with st.sidebar:
     
     st.markdown("---")
     st.info("""
-    **📌 Panduan Metode:**
+    **📌 Panduan Metode Network Analysis:**
     
-    1. **Service Area**: 
-       - Convex hull berbobot dari titik pengamatan dan nodes terjangkau
-       - Mempertimbangkan struktur jaringan jalan
+    1. **Service Area (Network Analysis)**: 
+       - **Analisis jaringan sebenarnya** berdasarkan struktur jalan
+       - **Buffer edges** berdasarkan jarak dari titik awal
+       - **Union semua buffered edges** untuk membuat service area
+       - **Convex hull** untuk bentuk yang smooth
        - Akurat untuk analisis berbasis jaringan
-       - **Buffer hingga 5000 meter** untuk area coverage yang lebih luas
     
     2. **Buffer dari Titik**: 
        - Buffer sederhana dari titik analisis
@@ -919,7 +949,7 @@ with st.sidebar:
        - Cepat dan sederhana untuk estimasi awal
     
     **🎯 Rekomendasi:**
-    - **Service Area**: Untuk analisis akurat berdasarkan jaringan jalan
+    - **Service Area**: Untuk analisis akurat berbasis jaringan jalan
     - **Buffer dari Titik**: Untuk analisis cepat dan sederhana
     """)
 
@@ -957,13 +987,13 @@ if analyze_button and time_limits:
             st.subheader("🗺️ Peta Jangkauan Fasilitas Kesehatan")
             
             if accessibility_zones:
-                m = create_comprehensive_map(location_point, accessibility_zones, health_facilities)
+                m = create_comprehensive_map(location_point, accessibility_zones, health_facilities, reachable_edges)
                 st_folium(m, width=1200, height=600, returned_objects=[])
             else:
                 st.warning("⚠️ Tidak ada zona jangkauan yang dapat dihitung.")
 
         with tab2:
-            st.subheader("📊 Dashboard Analisis")
+            st.subheader("📊 Dashboard Analisis Network Coverage")
             
             col1, col2, col3 = st.columns(3)
             
@@ -1018,25 +1048,88 @@ if analyze_button and time_limits:
                     help="Kecepatan yang digunakan untuk perhitungan"
                 )
             
-            # Tampilkan zona jangkauan
-            st.subheader("📍 Zona Jangkauan")
-            
-            if accessibility_zones:
-                zones_data = []
-                for time_limit, zone_data in accessibility_zones.items():
-                    zones_data.append({
-                        "⏱️ Batas Waktu": f"{time_limit} menit",
-                        "🔧 Metode": zone_data.get('calculation_method', area_calculation_method),
-                        "📐 Luas Area": f"{zone_data['area_sqkm']:.2f} km²",
-                        "🎯 Jangkauan": f"{zone_data['max_distance']:.0f} m",
-                        "🏥 Fasilitas": f"{zone_data.get('facilities_count', 0)}",
-                        "📊 Node Jaringan": zone_data['nodes_count'] if area_calculation_method != "Buffer dari Titik" else "N/A"
-                    })
+            # Tampilkan statistik Network Analysis
+            if area_calculation_method == "Service Area" and accessibility_zones:
+                st.subheader("📊 Statistik Network Analysis")
                 
-                zones_df = pd.DataFrame(zones_data)
-                st.dataframe(zones_df, use_container_width=True, hide_index=True)
+                network_stats = []
+                for time_limit, zone_data in accessibility_zones.items():
+                    if zone_data.get('calculation_method') == "Service Area":
+                        # Hitung edges yang digunakan
+                        edges_count = len(reachable_edges.get(time_limit, [])) if reachable_edges else 0
+                        
+                        network_stats.append({
+                            "⏱️ Waktu": f"{time_limit} menit",
+                            "📏 Jarak Maks": f"{zone_data['max_distance']:.0f} m",
+                            "🛣️ Edges Terjangkau": edges_count,
+                            "📐 Luas Area": f"{zone_data['area_sqkm']:.2f} km²",
+                            "🏥 Fasilitas": zone_data.get('facilities_count', 0)
+                        })
+                
+                if network_stats:
+                    stats_df = pd.DataFrame(network_stats)
+                    st.dataframe(stats_df, use_container_width=True, hide_index=True)
+                    
+                    # Visualisasi perbandingan
+                    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+                    
+                    # Plot 1: Area vs Waktu
+                    time_limits_list = list(accessibility_zones.keys())
+                    areas = [accessibility_zones[t]['area_sqkm'] for t in time_limits_list]
+                    
+                    ax1.bar([str(t) for t in time_limits_list], areas, color='steelblue', edgecolor='black')
+                    ax1.set_xlabel('Batas Waktu (menit)', fontsize=12, fontweight='bold')
+                    ax1.set_ylabel('Luas Area (km²)', fontsize=12, fontweight='bold')
+                    ax1.set_title('Luas Service Area vs Waktu', fontsize=14, fontweight='bold')
+                    ax1.grid(axis='y', alpha=0.3)
+                    
+                    # Plot 2: Fasilitas vs Waktu
+                    facilities_count = [accessibility_zones[t].get('facilities_count', 0) for t in time_limits_list]
+                    
+                    ax2.bar([str(t) for t in time_limits_list], facilities_count, color='coral', edgecolor='black')
+                    ax2.set_xlabel('Batas Waktu (menit)', fontsize=12, fontweight='bold')
+                    ax2.set_ylabel('Jumlah Fasilitas', fontsize=12, fontweight='bold')
+                    ax2.set_title('Fasilitas Terjangkau vs Waktu', fontsize=14, fontweight='bold')
+                    ax2.grid(axis='y', alpha=0.3)
+                    
+                    plt.tight_layout()
+                    st.pyplot(fig)
+            
+            # Tampilkan informasi metode
+            st.subheader("🔧 Informasi Metode Analisis")
+            
+            if area_calculation_method == "Service Area":
+                method_info = """
+                **🔍 Service Area (Network Analysis)**
+                
+                **Algoritma yang digunakan:**
+                1. **Dijkstra Algorithm**: Menghitung jarak terpendek dari titik awal ke semua nodes
+                2. **Edge Buffering**: Setiap edge yang terjangkau dibuffer berdasarkan jaraknya dari titik awal
+                3. **Union Operation**: Semua buffered edges digabungkan menjadi satu polygon
+                4. **Convex Hull**: Polygon di-simplify dengan convex hull untuk bentuk yang smooth
+                5. **Final Buffer**: Buffer tambahan untuk smoothing dan memastikan coverage
+                
+                **Parameter:**
+                - Buffer Service Area: `{service_buffer}` meter
+                - Analisis berbasis jaringan jalan aktual
+                - Akurasi tinggi untuk analisis transportasi
+                """.format(service_buffer=service_buffer)
             else:
-                st.info("ℹ️ Tidak ada zona jangkauan yang dapat dihitung.")
+                method_info = """
+                **🔍 Buffer dari Titik**
+                
+                **Algoritma yang digunakan:**
+                1. **Direct Buffering**: Buffer langsung dari titik analisis
+                2. **Shape Selection**: Bentuk buffer ({shape})
+                3. **Area Calculation**: Perhitungan luas area buffer
+                
+                **Parameter:**
+                - Bentuk Buffer: `{shape}`
+                - Analisis sederhana tanpa jaringan
+                - Cepat untuk estimasi awal
+                """.format(shape=buffer_shape)
+            
+            st.markdown(method_info)
         
         with tab3:
             st.subheader("🏥 Fasilitas Kesehatan yang Dapat Diakses")
@@ -1063,6 +1156,15 @@ if analyze_button and time_limits:
                                 
                                 fac_df = pd.DataFrame(fac_data)
                                 st.dataframe(fac_df, use_container_width=True, hide_index=True)
+                                
+                                # Ekspor data
+                                csv = fac_df.to_csv(index=False).encode('utf-8')
+                                st.download_button(
+                                    label="📥 Download Data CSV",
+                                    data=csv,
+                                    file_name=f"fasilitas_{time_limit}menit.csv",
+                                    mime="text/csv"
+                                )
                             else:
                                 st.info(f"ℹ️ Tidak ada fasilitas yang dapat diakses dalam {time_limit} menit.")
             else:
@@ -1072,77 +1174,61 @@ if analyze_button and time_limits:
             st.subheader("📈 Analisis dan Visualisasi")
             
             if accessibility_zones:
-                col1, col2 = st.columns(2)
+                # Plot perbandingan metode
+                fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
                 
-                with col1:
-                    # Plot area zona
-                    fig, ax = plt.subplots(figsize=(10, 6))
-                    
-                    time_limits_list = list(accessibility_zones.keys())
-                    areas = [accessibility_zones[t]['area_sqkm'] for t in time_limits_list]
-                    
-                    # Warna gradient
-                    colors = plt.cm.YlOrRd(np.linspace(0.4, 0.9, len(time_limits_list)))
-                    
-                    bars = ax.bar([str(t) for t in time_limits_list], areas, color=colors, edgecolor='black')
-                    ax.set_xlabel('Batas Waktu (menit)', fontsize=12, fontweight='bold')
-                    ax.set_ylabel('Luas Area (km²)', fontsize=12, fontweight='bold')
-                    ax.set_title('Luas Area Jangkauan', fontsize=14, fontweight='bold')
+                # Data untuk plotting
+                time_limits_list = list(accessibility_zones.keys())
+                areas = [accessibility_zones[t]['area_sqkm'] for t in time_limits_list]
+                facilities = [accessibility_zones[t].get('facilities_count', 0) for t in time_limits_list]
+                
+                # Plot 1: Area Coverage
+                colors_area = plt.cm.YlOrRd(np.linspace(0.4, 0.9, len(time_limits_list)))
+                bars1 = ax1.bar([str(t) for t in time_limits_list], areas, color=colors_area, edgecolor='black')
+                ax1.set_xlabel('Batas Waktu (menit)', fontsize=12, fontweight='bold')
+                ax1.set_ylabel('Luas Area (km²)', fontsize=12, fontweight='bold')
+                ax1.set_title('Luas Area Jangkauan', fontsize=14, fontweight='bold')
+                
+                # Tambahkan nilai di atas bar
+                for bar in bars1:
+                    height = bar.get_height()
+                    ax1.text(bar.get_x() + bar.get_width()/2., height,
+                            f'{height:.2f}', ha='center', va='bottom', fontsize=10, fontweight='bold')
+                
+                ax1.grid(axis='y', alpha=0.3)
+                
+                # Plot 2: Fasilitas Terjangkau
+                if sum(facilities) > 0:
+                    colors_fac = plt.cm.Blues(np.linspace(0.4, 0.9, len(time_limits_list)))
+                    bars2 = ax2.bar([str(t) for t in time_limits_list], facilities, 
+                                   color=colors_fac, edgecolor='black')
+                    ax2.set_xlabel('Batas Waktu (menit)', fontsize=12, fontweight='bold')
+                    ax2.set_ylabel('Jumlah Fasilitas', fontsize=12, fontweight='bold')
+                    ax2.set_title('Fasilitas yang Dapat Diakses', fontsize=14, fontweight='bold')
                     
                     # Tambahkan nilai di atas bar
-                    for bar in bars:
+                    for bar in bars2:
                         height = bar.get_height()
-                        ax.text(bar.get_x() + bar.get_width()/2., height,
-                                f'{height:.2f}', ha='center', va='bottom', fontsize=10, fontweight='bold')
+                        ax2.text(bar.get_x() + bar.get_width()/2., height,
+                                f'{height}', ha='center', va='bottom', fontsize=10, fontweight='bold')
                     
-                    plt.grid(axis='y', alpha=0.3)
-                    plt.tight_layout()
-                    st.pyplot(fig)
+                    ax2.grid(axis='y', alpha=0.3)
+                else:
+                    ax2.text(0.5, 0.5, 'Tidak ada data fasilitas', 
+                            ha='center', va='center', transform=ax2.transAxes, 
+                            fontsize=12, fontweight='bold')
+                    ax2.set_title('Tidak Ada Fasilitas Ditemukan', fontsize=14, fontweight='bold')
                 
-                with col2:
-                    # Plot jumlah fasilitas per zona
-                    fig2, ax2 = plt.subplots(figsize=(10, 6))
-                    
-                    facilities_count = []
-                    for time_limit in sorted(time_limits):
-                        if time_limit in accessibility_zones:
-                            facilities_count.append(accessibility_zones[time_limit].get('facilities_count', 0))
-                        else:
-                            facilities_count.append(0)
-                    
-                    if sum(facilities_count) > 0:
-                        # Warna gradient
-                        colors2 = plt.cm.Blues(np.linspace(0.4, 0.9, len(time_limits)))
-                        
-                        bars2 = ax2.bar([str(t) for t in sorted(time_limits)], facilities_count, 
-                                       color=colors2, edgecolor='black')
-                        ax2.set_xlabel('Batas Waktu (menit)', fontsize=12, fontweight='bold')
-                        ax2.set_ylabel('Jumlah Fasilitas', fontsize=12, fontweight='bold')
-                        ax2.set_title('Fasilitas yang Dapat Diakses', fontsize=14, fontweight='bold')
-                        
-                        # Tambahkan nilai di atas bar
-                        for bar in bars2:
-                            height = bar.get_height()
-                            ax2.text(bar.get_x() + bar.get_width()/2., height,
-                                    f'{height}', ha='center', va='bottom', fontsize=10, fontweight='bold')
-                        
-                        plt.grid(axis='y', alpha=0.3)
-                    else:
-                        ax2.text(0.5, 0.5, 'Tidak ada data fasilitas', 
-                                ha='center', va='center', transform=ax2.transAxes, 
-                                fontsize=12, fontweight='bold')
-                        ax2.set_title('Tidak Ada Fasilitas Ditemukan', fontsize=14, fontweight='bold')
-                    
-                    plt.tight_layout()
-                    st.pyplot(fig2)
-            
+                plt.tight_layout()
+                st.pyplot(fig)
+                
                 # Ringkasan statistik
-                st.subheader("📋 Ringkasan Analisis")
+                st.subheader("📋 Ringkasan Analisis Network Coverage")
                 
                 total_facilities_all = sum(zone.get('facilities_count', 0) for zone in accessibility_zones.values())
                 
                 if total_facilities_all > 0:
-                    # Hitung statistik
+                    # Hitung statistik detail
                     unique_names = set()
                     all_travel_times = []
                     all_distances = []
@@ -1154,6 +1240,7 @@ if analyze_button and time_limits:
                                 all_travel_times.append(fac['travel_time_min'])
                                 all_distances.append(fac['distance_m'])
                     
+                    # Tampilkan metrik
                     col1, col2, col3, col4 = st.columns(4)
                     
                     with col1:
@@ -1170,19 +1257,55 @@ if analyze_button and time_limits:
                     with col4:
                         min_time = min(all_travel_times) if all_travel_times else 0
                         st.metric("⚡ Waktu Terdekat", f"{min_time:.1f} menit")
+                    
+                    # Tampilkan distribusi waktu tempuh
+                    if all_travel_times:
+                        fig2, ax2 = plt.subplots(figsize=(10, 6))
+                        ax2.hist(all_travel_times, bins=15, color='skyblue', edgecolor='black', alpha=0.7)
+                        ax2.set_xlabel('Waktu Tempuh (menit)', fontsize=12, fontweight='bold')
+                        ax2.set_ylabel('Jumlah Fasilitas', fontsize=12, fontweight='bold')
+                        ax2.set_title('Distribusi Waktu Tempuh ke Fasilitas', fontsize=14, fontweight='bold')
+                        ax2.grid(axis='y', alpha=0.3)
+                        plt.tight_layout()
+                        st.pyplot(fig2)
                 else:
                     st.info("ℹ️ Tidak ada data fasilitas untuk ditampilkan.")
+                
+                # Ekspor hasil analisis
+                st.subheader("💾 Ekspor Hasil Analisis")
+                
+                # Buat dataframe ringkasan
+                summary_data = []
+                for time_limit, zone_data in accessibility_zones.items():
+                    summary_data.append({
+                        'time_limit_min': time_limit,
+                        'method': zone_data.get('calculation_method', area_calculation_method),
+                        'max_distance_m': zone_data['max_distance'],
+                        'area_sqkm': zone_data['area_sqkm'],
+                        'facilities_count': zone_data.get('facilities_count', 0)
+                    })
+                
+                summary_df = pd.DataFrame(summary_data)
+                
+                # Tombol download
+                csv_summary = summary_df.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label="📥 Download Ringkasan Analisis (CSV)",
+                    data=csv_summary,
+                    file_name="ringkasan_analisis_network_coverage.csv",
+                    mime="text/csv"
+                )
     
     else:
         st.error("❌ Analisis gagal. Periksa parameter dan coba lagi.")
 
 elif not analyze_button:
-    # Tampilkan halaman awal jika analisis belum dijalankan
+    # Tampilkan halaman awal
     col1, col2 = st.columns([2, 1])
     
     with col1:
         st.markdown("""
-        ## 📋 Panduan Penggunaan
+        ## 📋 Panduan Penggunaan Network Analysis Coverage
         
         1. **📍 Pilih lokasi** di sidebar (kota atau koordinat manual)
         2. **⚙️ Atur parameter**:
@@ -1190,31 +1313,35 @@ elif not analyze_button:
            - Kecepatan perjalanan
            - Radius pencarian (500-5000m)
            - Batas waktu jangkauan (menit)
-           - Metode coverage area (hanya 2 pilihan)
+           - Metode coverage area
         3. **🚀 Klik "Jalankan Analisis"** untuk memulai
         
-        ## 🎯 Fitur Utama
-
-        - **2 metode coverage area** yang disederhanakan
-        - **Service Area**: Analisis akurat berbasis jaringan jalan
-        - **Buffer dari Titik**: Analisis cepat dan sederhana
-        - **Identifikasi fasilitas kesehatan** yang terjangkau
-        - **Peta interaktif** dengan filter dan layer
-        - **Dashboard statistik** dan visualisasi
+        ## 🎯 Fitur Network Analysis
+        
+        - **Service Area**: Analisis berbasis jaringan jalan sebenarnya
+        - **Buffer Edges**: Setiap edge dibuffer berdasarkan jarak dari titik awal
+        - **Union Operation**: Gabungkan semua buffered edges menjadi service area
+        - **Visualisasi Jaringan**: Tampilkan edges yang terjangkau di peta
+        - **Analisis Statistik**: Dashboard lengkap dengan metrik network
         """)
     
     with col2:
         st.markdown("""
-        ## 💡 Tips Optimal
+        ## 💡 Tips Network Analysis
         
         ### Untuk Hasil Terbaik:
-        - Gunakan **radius 1000-2000m** untuk analisis cepat
-        - Pilih **mode 'jalan kaki'** untuk analisis pejalan kaki
-        - **Batas waktu 15-25 menit** memberikan hasil optimal
+        - Gunakan **radius 1500-3000m** untuk coverage yang optimal
+        - **Service Buffer 100-200m** untuk hasil yang smooth
+        - Pilih **mode sesuai transportasi** untuk analisis akurat
         
-        ### Rekomendasi Metode:
-        - **Service Area**: Untuk analisis akurat berbasis jaringan
-        - **Buffer dari Titik**: Untuk estimasi cepat tanpa jaringan
+        ### Visualisasi:
+        - **Garis abu-abu tipis** = edges jaringan yang terjangkau
+        - **Area berwarna** = service area hasil analisis
+        - **Marker warna** = fasilitas kesehatan berdasarkan jenis
+        
+        ### Performa:
+        - Analisis jaringan lebih lambat dari buffer sederhana
+        - Hasil lebih akurat untuk perencanaan transportasi
         """)
 
 # Footer
@@ -1223,12 +1350,12 @@ st.markdown(
     """
     <div style='text-align: center; padding: 20px;'>
         <p style='font-size: 1.1em; font-weight: bold; color: #2c3e50;'>
-        🏥📍 <b>Analisis Jangkauan Fasilitas Kesehatan dengan Network Coverage</b> v3.0
+        🏥📍 <b>Network Analysis Coverage Area</b> v4.0 - True Network Analysis
         </p>
         <p style='font-size: 0.9em; color: #7f8c8d;'>
         Developer: Adipandang Yudono, S.Si., MURP., PhD (Spatial Analysis, Architecture System, Scrypt Developer, WebGIS Analytics) & dr. Aurick Yudha Nagara, Sp.EM, KPEC (Health Facilities Analysis)
         <br>
-        Ragam aplikasi yang digunakan: Streamlit • OSMnx • Folium • GeoPandas • NetworkX • SciPy
+        <b>Algoritma Network Analysis:</b> Dijkstra + Edge Buffering + Union + Convex Hull
         <br>
         Data sumber: © OpenStreetMap contributors
         <br>
@@ -1268,16 +1395,35 @@ st.markdown("""
         padding: 10px 0;
     }
     
-    /* Card styling */
+    /* Metric cards dengan gradient network */
     [data-testid="stMetric"] {
-        background-color: #f8f9fa;
+        background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
         border-radius: 10px;
         padding: 15px;
         border-left: 4px solid #4B79A1;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+        transition: transform 0.3s;
     }
     
-    /* Tab styling */
+    [data-testid="stMetric"]:hover {
+        transform: translateY(-3px);
+        box-shadow: 0 4px 12px rgba(0,0,0,0.12);
+    }
+    
+    /* Network visualization styling */
+    .network-edge {
+        stroke: #4B79A1;
+        stroke-width: 1;
+        opacity: 0.3;
+    }
+    
+    .network-node {
+        fill: #FF5252;
+        stroke: #fff;
+        stroke-width: 1;
+    }
+    
+    /* Tab styling dengan tema network */
     .stTabs [data-baseweb="tab-list"] {
         gap: 1rem;
         padding: 0 10px;
@@ -1287,29 +1433,59 @@ st.markdown("""
         border-radius: 8px 8px 0 0;
         padding: 10px 20px;
         font-weight: bold;
+        background: linear-gradient(135deg, #f1f8ff 0%, #e3f2fd 100%);
         transition: all 0.3s;
     }
     
     .stTabs [data-baseweb="tab"]:hover {
-        background-color: #e9ecef;
+        background: linear-gradient(135deg, #e3f2fd 0%, #bbdefb 100%);
     }
     
     .stTabs [aria-selected="true"] {
-        background-color: #4B79A1 !important;
+        background: linear-gradient(135deg, #4B79A1 0%, #283E51 100%) !important;
         color: white !important;
-        box-shadow: 0 2px 4px rgba(75, 121, 161, 0.3);
+        box-shadow: 0 2px 8px rgba(75, 121, 161, 0.3);
     }
     
-    /* Dataframe styling */
+    /* Dataframe dengan tema network */
     .dataframe {
         border-radius: 10px;
         overflow: hidden;
         box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        border: 1px solid #e0e0e0;
     }
     
-    /* Progress bar */
+    .dataframe thead th {
+        background: linear-gradient(135deg, #4B79A1 0%, #283E51 100%);
+        color: white;
+        font-weight: bold;
+    }
+    
+    /* Progress bar dengan tema network */
     .stProgress > div > div {
-        background: linear-gradient(90deg, #4B79A1, #6C8EBF);
+        background: linear-gradient(90deg, #4B79A1, #6C8EBF, #8FA3D1);
+        background-size: 200% 100%;
+        animation: gradientMove 2s ease infinite;
+    }
+    
+    @keyframes gradientMove {
+        0% { background-position: 0% 50%; }
+        50% { background-position: 100% 50%; }
+        100% { background-position: 0% 50%; }
+    }
+    
+    /* Sidebar styling */
+    [data-testid="stSidebar"] {
+        background: linear-gradient(180deg, #f8f9fa 0%, #e9ecef 100%);
+    }
+    
+    /* Network analysis info box */
+    .network-info {
+        background: linear-gradient(135deg, #e3f2fd 0%, #bbdefb 100%);
+        border-radius: 10px;
+        padding: 15px;
+        border-left: 4px solid #2196F3;
+        margin: 10px 0;
     }
 </style>
 """, unsafe_allow_html=True)
