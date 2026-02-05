@@ -13,7 +13,7 @@ import time
 import math
 from folium.plugins import MiniMap, Fullscreen
 from shapely.ops import unary_union
-from pyproj import Transformer
+from pyproj import CRS
 from scipy.spatial import ConvexHull
 
 # Suppress warnings
