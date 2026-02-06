@@ -68,7 +68,7 @@ def get_default_speed(mode_bahasa):
     speed_map = {
         "jalan kaki": 5.0,
         "sepeda": 15.0,
-        "mobil/motor": 30.0
+        "mobil/motor": 40.00  # DIUBAH: dari 30.0 menjadi 40.00
     }
     return speed_map.get(mode_bahasa, 5.0)
 
@@ -973,7 +973,9 @@ def create_comprehensive_map(location_point, accessibility_zones, health_facilit
             15: '#EF9A9A',
             20: '#E57373',
             25: '#EF5350',
-            30: '#F44336'
+            30: '#F44336',
+            45: '#D32F2F',
+            60: '#B71C1C'
         }
         
         # FIX: Visualisasi jaringan (jika ada)
@@ -1146,7 +1148,7 @@ def create_comprehensive_map(location_point, accessibility_zones, health_facilit
         # Tambahkan legenda
         legend_html = '''
         <div style="position: fixed; 
-                    bottom: 50px; left: 50px; width: 220px; height: 280px; 
+                    bottom: 50px; left: 50px; width: 220px; height: 320px; 
                     background-color: white; border:2px solid grey; z-index:9999; 
                     font-size:14px; padding: 10px; border-radius: 5px; opacity: 0.9;">
             <b>LEGENDA</b><br>
@@ -1162,6 +1164,8 @@ def create_comprehensive_map(location_point, accessibility_zones, health_facilit
             <div style="background-color: #E57373; width: 20px; height: 20px; display: inline-block; margin-right: 5px; border: 1px solid #ccc;"></div> 20 menit<br>
             <div style="background-color: #EF5350; width: 20px; height: 20px; display: inline-block; margin-right: 5px; border: 1px solid #ccc;"></div> 25 menit<br>
             <div style="background-color: #F44336; width: 20px; height: 20px; display: inline-block; margin-right: 5px; border: 1px solid #ccc;"></div> 30 menit<br>
+            <div style="background-color: #D32F2F; width: 20px; height: 20px; display: inline-block; margin-right: 5px; border: 1px solid #ccc;"></div> 45 menit<br>
+            <div style="background-color: #B71C1C; width: 20px; height: 20px; display: inline-block; margin-right: 5px; border: 1px solid #ccc;"></div> 60 menit<br>
             <div style="margin-top: 5px;"><small><i>Garis tipis: Jaringan jalan yang terjangkau</i></small></div>
         </div>
         '''
@@ -1221,7 +1225,7 @@ with st.sidebar:
     network_type_bahasa = st.selectbox(
         "Mode Transportasi:",
         ["jalan kaki", "sepeda", "mobil/motor"],
-        index=0,
+        index=2,  # DIUBAH: default menjadi mobil/motor (index 2)
         help="Jenis jaringan yang digunakan untuk analisis"
     )
     
@@ -1230,7 +1234,7 @@ with st.sidebar:
     travel_speed = st.slider(
         "Kecepatan (km/jam):",
         min_value=1.0,
-        max_value=60.0,
+        max_value=100.0,  # DIUBAH: maksimal menjadi 100 km/jam
         value=get_default_speed(network_type_bahasa),
         step=0.5
     )
@@ -1238,7 +1242,7 @@ with st.sidebar:
     search_radius = st.slider(
         "Radius Jaringan (meter):",
         min_value=500,
-        max_value=5000,
+        max_value=30000,  # DIUBAH: dari 5000 menjadi 30000
         value=2000,
         step=100,
         help="Radius untuk mengambil jaringan jalan dari titik analisis"
@@ -1246,8 +1250,8 @@ with st.sidebar:
     
     time_limits = st.multiselect(
         "Batas Waktu (menit):",
-        [5, 10, 15, 20, 25, 30],
-        default=[15, 25],
+        [5, 10, 15, 20, 25, 30, 45, 60],  # DIUBAH: menambahkan opsi 45 dan 60 menit
+        default=[15, 30],  # DIUBAH: default menjadi 15 dan 30 menit
         help="Waktu tempuh maksimum untuk menghitung jangkauan"
     )
     
@@ -1267,7 +1271,7 @@ with st.sidebar:
         st.info("**Metode Concave Hull**: Service area akan mengikuti bentuk jaringan jalan")
         service_buffer = st.slider(
             "Buffer Service Area (meter):",
-            20, 5000, 100, 10,
+            20, 30000, 100, 10,  # DIUBAH: dari 5000 menjadi 30000
             help="Buffer untuk smoothing service area dari jaringan jalan"
         )
         
@@ -1514,7 +1518,7 @@ if analyze_button and time_limits:
                     
                     **Algoritma yang digunakan:**
                     1. **Dijkstra Algorithm**: Menghitung jarak terpendek dari titik awal ke semua nodes dalam radius {search_radius}m
-                    2. **Identifikasi Edges Terjangkau**: Edges yang memiliki minimal satu node dengan jarak ≤ {max([speed_kmh * 1000 / 60 * t for t in time_limits]):.0f}m
+                    2. **Identifikasi Edges Terjangkau**: Edges yang memiliki minimal satu node dengan jarak ≤ {max([travel_speed * 1000 / 60 * t for t in time_limits]):.0f}m
                     3. **Kumpulkan Points**: Mengumpulkan semua titik dari nodes dan edges yang terjangkau
                     4. **Alpha Shape (Concave Hull)**: Membentuk concave hull menggunakan alpha shape algorithm
                     5. **Buffer Smoothing**: Buffer sebesar {service_buffer}m untuk bentuk yang smooth
@@ -1770,7 +1774,7 @@ elif not analyze_button:
         2. **⚙️ Atur parameter**:
            - Mode transportasi (jalan kaki/sepeda/mobil/motor)
            - Kecepatan perjalanan (km/jam)
-           - Radius pencarian (500-5000m)
+           - Radius pencarian (500-30000m)
            - Batas waktu jangkauan (menit)
            - Metode coverage area (Service Area/Buffer dari Titik)
            - Metode hull (Concave Hull/Buffer Edges)
@@ -1791,8 +1795,12 @@ elif not analyze_button:
         ## 💡 Tips Network Analysis
         
         ### Untuk Hasil Terbaik:
-        - Gunakan **radius 1500-3000m** untuk coverage yang optimal
-        - **Service Buffer 100-200m** untuk hasil yang smooth
+        - **Urban Area**: Radius 2,000-5,000m, Buffer 100-500m
+        - **Suburban Area**: Radius 5,000-15,000m, Buffer 200-1,000m  
+        - **Rural Area**: Radius 15,000-30,000m, Buffer 500-3,000m
+
+        - Gunakan **radius 1000-10000m** untuk coverage yang optimal
+        - **Service Buffer 100-500m** untuk hasil yang smooth
         - Pilih **Concave Hull** untuk hasil yang mengikuti jaringan
         - Pilih **mode transportasi sesuai** untuk analisis akurat
         
@@ -1814,10 +1822,10 @@ st.markdown(
     """
     <div style='text-align: center; padding: 20px;'>
         <p style='font-size: 1.1em; font-weight: bold; color: #2c3e50;'>
-        🏥📍 <b>Network Analysis Coverage Area</b> v5.0 - Concave Hull Implementation
+        🏥📍 <b>Network Analysis Coverage Area</b> v5.0
         </p>
         <p style='font-size: 0.9em; color: #7f8c8d;'>
-        Developer: Adipandang Yudono, S.Si., MURP., PhD (Spatial Analysis, Architecture System, Scrypt Developer, WebGIS Analytics) , Dr (Cand). Firman Afrianto, ST., MT (QGIS Plugin Developer) & dr. Aurick Yudha Nagara, Sp.EM, KPEC (Health Facilities Analysis)
+        Developer: Adipandang Yudono, S.Si., MURP., PhD (Spatial Analysis, Architecture System, Scrypt Developer, WebGIS Analytics), Dr (Cand). Firman Afrianto (QGIS Plugin) & dr. Aurick Yudha Nagara, Sp.EM, KPEC (Health Facilities Analysis)
         <br>
         <b>Algoritma Network Analysis:</b> Dijkstra + Alpha Shape (Concave Hull) + Buffer Smoothing
         <br>
