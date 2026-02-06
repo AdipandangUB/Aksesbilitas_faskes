@@ -17,7 +17,6 @@ from pyproj import CRS, Transformer
 from scipy.spatial import ConvexHull
 from collections import defaultdict
 from shapely import concave_hull, convex_hull
-# HAPUS BARIS INI: import alphashape
 
 # Suppress warnings
 warnings.filterwarnings('ignore')
@@ -1351,7 +1350,7 @@ def display_welcome_page():
         """)
 
 # ============================================================
-# SIDEBAR INPUT
+# SIDEBAR INPUT - DENGAN PERUBAHAN BUFFER MAKSIMUM 5000m
 # ============================================================
 with st.sidebar:
     st.header("📍 Parameter Titik Analisis")
@@ -1435,10 +1434,11 @@ with st.sidebar:
     
     if area_calculation_method == "Service Area":
         st.info("**Metode Concave Hull**: Service area akan mengikuti bentuk jaringan jalan")
+        # PERUBAHAN UTAMA DI SINI: Maksimum buffer diubah dari 30000 menjadi 5000
         service_buffer = st.slider(
             "Buffer Service Area (meter):",
-            20, 30000, 100, 10,
-            help="Buffer untuk smoothing service area dari jaringan jalan",
+            20, 5000, 100, 10,  # max_value: 30000 → 5000
+            help="Buffer untuk smoothing service area dari jaringan jalan (maks: 5000m)",
             key="service_buffer"
         )
         
@@ -1494,10 +1494,13 @@ with st.sidebar:
        - Tidak memerlukan analisis jaringan jalan
        - Cepat dan sederhana untuk estimasi awal
     
-    **🎯 Rekomendasi:**
-    - **Concave Hull**: Untuk hasil yang akurat dan mengikuti jaringan
-    - **Buffer Edges**: Untuk hasil yang smooth dengan performa baik
-    - **Buffer dari Titik**: Untuk analisis cepat dan sederhana
+    **🎯 Rekomendasi Buffer Service Area:**
+    - **Jalan kaki**: 50-200 meter
+    - **Sepeda**: 100-500 meter  
+    - **Mobil/motor**: 200-2000 meter
+    - **Maksimum**: 5000 meter (untuk area rural/regional)
+    
+    **⚠️ Catatan:** Buffer di atas 1000m dapat menghasilkan area yang sangat besar dan mempengaruhi performa.
     """)
 
 # ============================================================
