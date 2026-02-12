@@ -1595,7 +1595,7 @@ st.markdown(
         🏥📍 <b>Network Analysis Coverage Area</b> v5.0
         </p>
         <p style='font-size: 0.9em; color: #7f8c8d;'>
-        Developer: Adipandang Yudono, S.Si., MURP., PhD (Spatial Analysis, Architecture System, Scrypt Developer, WebGIS Analytics), Dr (Cand). Firman Afrianto (QGIS Plugin) & dr. Aurick Yudha Nagara, Sp.EM, KPEC (Health Facilities Analysis)
+        Developer: Adipandang Yudono, S.Si., MURP., PhD (Spatial Analysis, Architecture System, Scrypt Developer, WebGIS Analytics), Dr (Cand). Firman Afrianto (QGIS Plugin), dr. Aurick Yudha Nagara, Sp.EM, KPEC (Health Facilities Analysis), dr. Nuretha Hevy Purwaningtyas, M.Sc, Sp.DLP (healthy behaviour analyst) & Dr. DIAH ROYANI MEISANI, S.S., M.Pd. (Database)
         <br>
         <b>Algoritma Network Analysis:</b> Dijkstra + Concave Hull (Shapely) + Buffer Smoothing
         <br>
