@@ -1595,7 +1595,7 @@ st.markdown(
         🏥📍 <b>Network Analysis Coverage Area</b> v5.0
         </p>
         <p style='font-size: 0.9em; color: #7f8c8d;'>
-        Developer: <b>Adipandang Yudono, S.Si., MURP., PhD <b>(Spatial Analysis, Architecture System, Scrypt Developer, WebGIS Analytics), <b>Dr (Cand). Firman Afrianto<b> (QGIS Plugin), <b>dr. Nuretha Hevy Purwaningtyas, M.Sc, Sp.DLP<b> (health behaviour analysis), <b>Dr. Diah Royani Meisani, S.S., M.Pd.<b> (Database), <b>dr. Aurick Yudha Nagara, Sp.EM, KPEC<b> (Health Facilities accessibilties), <b>dr. Fatah Abdul Yasir<b> (Health Facilities accessibilties) &  <b>dr. Rico Wicaksana Putra<b> (Health Facilities accessibilties).
+        Developer: <b>Adipandang Yudono, S.Si., MURP., PhD </b>(Spatial Analysis, Architecture System, Scrypt Developer, WebGIS Analytics), <b>Dr (Cand). Firman Afrianto</b> (QGIS Plugin), <b>dr. Nuretha Hevy Purwaningtyas, M.Sc, Sp.DLP</b> (health behaviour analysis), <b>Dr. Diah Royani Meisani, S.S., M.Pd.</b> (Database), <b>dr. Aurick Yudha Nagara, Sp.EM, KPEC</b> (Health Facilities accessibilties), <b>dr. Fatah Abdul Yasir</b> (Health Facilities accessibilties) & <b>dr. Rico Wicaksana Putra</b> (Health Facilities accessibilties).
         <br>
         <b>Algoritma Network Analysis:</b> Dijkstra + Concave Hull (Shapely) + Buffer Smoothing
         <br>
