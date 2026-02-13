@@ -1419,7 +1419,7 @@ with st.sidebar:
     time_limits = st.multiselect(
         "Batas Waktu (menit):",
         [5, 10, 15, 20, 25, 30, 45, 60],
-        default=[15, 30],
+        default=[15, 25],
         help="Waktu tempuh maksimum untuk menghitung jangkauan",
         key="time_limits"
     )
@@ -1595,7 +1595,7 @@ st.markdown(
         🏥📍 <b>Network Analysis Coverage Area</b> v5.0
         </p>
         <p style='font-size: 0.9em; color: #7f8c8d;'>
-        Developer: Adipandang Yudono, S.Si., MURP., PhD (Spatial Analysis, Architecture System, Scrypt Developer, WebGIS Analytics), Dr (Cand). Firman Afrianto (QGIS Plugin), dr. Aurick Yudha Nagara, Sp.EM, KPEC (Health Facilities Analysis), dr. Nuretha Hevy Purwaningtyas, M.Sc, Sp.DLP (healthy behaviour analyst) & Dr. Diah Royani Meisani, S.S., M.Pd. (Database)
+        Developer: Adipandang Yudono, S.Si., MURP., PhD (Spatial Analysis, Architecture System, Scrypt Developer, WebGIS Analytics), Dr (Cand). Firman Afrianto (QGIS Plugin), dr. Nuretha Hevy Purwaningtyas, M.Sc, Sp.DLP (health behaviour analysis), Dr. Diah Royani Meisani, S.S., M.Pd. (Database), dr. Aurick Yudha Nagara, Sp.EM, KPEC (Health Facilities accessibilties), dr. Fatah Abdul Yasir (Health Facilities accessibilties) &  dr. Rico Wicaksana Putra (Health Facilities accessibilties).
         <br>
         <b>Algoritma Network Analysis:</b> Dijkstra + Concave Hull (Shapely) + Buffer Smoothing
         <br>
